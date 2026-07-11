@@ -1,0 +1,61 @@
+{
+  "name": "zatca-sdk",
+  "version": "0.1.0",
+  "description": "Production-ready ZATCA Phase 2 e-invoicing SDK for Saudi Arabia (Fatoora) — pure-JS crypto, validated against the official ZATCA validator and live sandbox",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aashahin/zatca-sdk.git"
+  },
+  "homepage": "https://github.com/aashahin/zatca-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/aashahin/zatca-sdk/issues"
+  },
+  "author": "aashahin",
+  "files": [
+    "src",
+    "SANDBOX_TESTING.md"
+  ],
+  "module": "src/index.ts",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "type": "module",
+  "private": false,
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target node",
+    "test": "bun test",
+    "test:sandbox": "ZATCA_SANDBOX=1 bun test tests/integration",
+    "validate:fatoora": "bun run scripts/validate-with-fatoora.ts",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@sinclair/typebox": "^0.32.0",
+    "@xmldom/xmldom": "^0.8.11",
+    "qrcode": "^1.5.4",
+    "xmldsigjs": "^2.8.5",
+    "xpath": "^0.0.34"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/qrcode": "^1.5.5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "keywords": [
+    "zatca",
+    "e-invoicing",
+    "saudi-arabia",
+    "fatoora",
+    "ubl",
+    "xml",
+    "qrcode"
+  ],
+  "license": "MIT"
+}
