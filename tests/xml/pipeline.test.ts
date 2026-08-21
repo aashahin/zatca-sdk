@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { signInvoice, computeInvoiceHash, validateInvoice } from "../../src/lib/egs/invoice-signer";
 import { computeInvoiceHash as hashXml } from "../../src/lib/xml/canonicalize";
 import { computeSignedPropertiesHash } from "../../src/lib/xml/xades";
-import { verifyInvoiceSignature } from "../../src/lib/crypto/signing";
+import { INITIAL_PREVIOUS_HASH, verifyInvoiceSignature } from "../../src/lib/crypto/signing";
 import { parseCertificate } from "../../src/lib/crypto/certificate";
 import { decodeTLVString } from "../../src/lib/crypto/qr";
 import { CREDENTIALS, OFFICIAL_CERT, sampleSimplifiedInvoice, sampleStandardInvoice } from "../fixtures";
@@ -105,6 +105,18 @@ describe("signing pipeline invariants", () => {
         expect(signed.invoiceHash).toBe(pre.data);
     });
 
+    test("empty PIH is replaced with the initial hash, matching computeInvoiceHash", async () => {
+        const invoice = sampleSimplifiedInvoice({ previousInvoiceHash: "" });
+        const pre = computeInvoiceHash(invoice);
+        if (!pre.success) throw pre.error;
+        const signed = await sign(invoice);
+        expect(signed.invoiceHash).toBe(pre.data);
+        expect(signed.signedXml).toContain(INITIAL_PREVIOUS_HASH);
+        expect(signed.signedXml).not.toContain(
+            'mimeCode="text/plain"></cbc:EmbeddedDocumentBinaryObject>',
+        );
+    });
+
     test("standard invoices sign too", async () => {
         const signed = await sign(sampleStandardInvoice());
         expect(signed.signedXml).toContain('name="0100000"');
@@ -119,6 +131,12 @@ describe("invoice validation", () => {
 
     test("catches arithmetic inconsistencies", () => {
         const errors = validateInvoice(sampleSimplifiedInvoice({ taxInclusiveAmount: 999 }));
+        expect(errors.some((e) => e.includes("taxInclusiveAmount"))).toBe(true);
+    });
+
+    test("rejects non-finite amounts instead of silently passing", () => {
+        const errors = validateInvoice(sampleSimplifiedInvoice({ taxTotal: NaN, taxInclusiveAmount: Infinity }));
+        expect(errors.some((e) => e.includes("taxTotal"))).toBe(true);
         expect(errors.some((e) => e.includes("taxInclusiveAmount"))).toBe(true);
     });
 

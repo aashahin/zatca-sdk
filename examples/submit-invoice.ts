@@ -37,7 +37,7 @@ const invoice: Invoice = {
     documentCurrency: "SAR",
     taxCurrency: "SAR",
     invoiceCounterValue: 0, // 0 → let the client assign the next ICV
-    previousInvoiceHash: "", // "" → let the client chain the PIH
+    previousInvoiceHash: "", // "" or omit → client chains PIH (uses INITIAL hash for first invoice)
     seller: {
         registrationName: "شركة توريد التكنولوجيا | Maximum Speed Tech Supply LTD",
         vatNumber: "399999999900003",

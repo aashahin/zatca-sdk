@@ -260,13 +260,27 @@ export function validateCertificate(input: string): Result<CertificateValidation
     const now = new Date();
     const warnings: string[] = [];
 
+    const fromTime = validFrom.getTime();
+    const toTime = validTo.getTime();
+    const invalidDate = Number.isNaN(fromTime) || Number.isNaN(toTime);
+
+    if (invalidDate) {
+        warnings.push("Certificate has an invalid validity period");
+        return {
+            success: true,
+            data: { isValid: false, isExpired: false, isNotYetValid: false, daysUntilExpiry: 0, warnings },
+        };
+    }
+
     const isExpired = now > validTo;
     const isNotYetValid = now < validFrom;
-    const daysUntilExpiry = Math.floor((validTo.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    const daysUntilExpiry = Math.floor((toTime - now.getTime()) / (1000 * 60 * 60 * 24));
 
     if (isExpired) warnings.push("Certificate has expired");
     if (isNotYetValid) warnings.push("Certificate is not yet valid");
-    if (!isExpired && daysUntilExpiry <= 30) warnings.push(`Certificate expires in ${daysUntilExpiry} days`);
+    if (!isExpired && !isNotYetValid && daysUntilExpiry <= 30) {
+        warnings.push(`Certificate expires in ${daysUntilExpiry} days`);
+    }
 
     return {
         success: true,
@@ -274,9 +288,10 @@ export function validateCertificate(input: string): Result<CertificateValidation
     };
 }
 
-/** True when the certificate expires within 30 days (or cannot be parsed) */
+/** True when the certificate expires within 30 days, is not yet valid, has expired, or cannot be parsed */
 export function needsRenewal(input: string): boolean {
     const result = validateCertificate(input);
     if (!result.success) return true;
+    if (!result.data.isValid) return true;
     return result.data.daysUntilExpiry <= 30;
 }

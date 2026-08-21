@@ -3,6 +3,7 @@
 
 import type { ZATCAAPIClient } from "./client";
 import type { ProductionCSID, Result } from "../types";
+import { parseCsidResponse } from "./csid";
 
 interface RenewalResponse {
     requestID: number | string;
@@ -28,13 +29,16 @@ export async function renewProductionCSID(
     );
     if (!result.success) return result;
 
+    const parsed = parseCsidResponse(result.data, "renewal");
+    if (!parsed.success) return parsed;
+
     return {
         success: true,
         data: {
-            requestId: Number(result.data.requestID),
-            binarySecurityToken: result.data.binarySecurityToken,
-            secret: result.data.secret,
-            tokenType: result.data.tokenType,
+            requestId: parsed.data.requestId,
+            binarySecurityToken: parsed.data.binarySecurityToken,
+            secret: parsed.data.secret,
+            tokenType: parsed.data.tokenType,
         },
     };
 }

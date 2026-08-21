@@ -70,6 +70,8 @@ export {
     type QROptions,
 } from "./lib/crypto";
 
+export { formatMoney, formatQuantity } from "./lib/money";
+
 // XML utilities
 export { QR_PLACEHOLDER, buildInvoiceXml, replaceQrPlaceholder } from "./lib/xml/builder";
 export {

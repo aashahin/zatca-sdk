@@ -3,6 +3,7 @@
 
 import { EGS, type EGSState } from "./egs/device";
 import { signInvoice, type SignedInvoice } from "./egs/invoice-signer";
+import { resolvePreviousInvoiceHash } from "./crypto/signing";
 import { clearInvoice } from "./api/clearance";
 import { reportInvoice } from "./api/reporting";
 import { ConfigurationError } from "./errors";
@@ -63,6 +64,7 @@ export class ZATCAClient {
     private readonly solutionName: string;
     private previousInvoiceHash?: string;
     private invoiceCounter = 0;
+    private signChain: Promise<void> = Promise.resolve();
 
     constructor(options: ZATCAClientOptions) {
         this.egs = new EGS(options.egsUnit, options.env);
@@ -82,6 +84,20 @@ export class ZATCAClient {
         if (state.egsState) this.egs.setState(state.egsState);
         this.previousInvoiceHash = state.previousInvoiceHash;
         this.invoiceCounter = state.invoiceCounter ?? 0;
+    }
+
+    private async withSignChainLock<T>(task: () => Promise<T>): Promise<T> {
+        const previous = this.signChain;
+        let release!: () => void;
+        this.signChain = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        await previous;
+        try {
+            return await task();
+        } finally {
+            release();
+        }
     }
 
     /**
@@ -116,7 +132,7 @@ export class ZATCAClient {
 
     /**
      * Sign an invoice with COMPLIANCE credentials and run it through ZATCA's
-     * compliance checks (onboarding step 3).
+     * compliance checks (onboarding step 3). Does not advance the ICV/PIH chain.
      */
     async checkInvoiceCompliance(invoice: Invoice): Promise<Result<ValidationResults>> {
         const credentials = this.egs.getComplianceCredentials();
@@ -143,44 +159,62 @@ export class ZATCAClient {
         return {
             ...invoice,
             invoiceCounterValue: invoice.invoiceCounterValue || this.invoiceCounter + 1,
-            previousInvoiceHash: invoice.previousInvoiceHash || this.previousInvoiceHash || "",
+            previousInvoiceHash: resolvePreviousInvoiceHash(
+                invoice.previousInvoiceHash,
+                this.previousInvoiceHash,
+            ),
         };
     }
 
     /**
      * Sign an invoice with production credentials.
      * On success the ICV counter and PIH chain advance — persist getState().
+     * Concurrent calls are serialised via an internal queue so ICV/PIH remain
+     * strictly sequential (no duplicate counters).
      */
     async sign(invoice: Invoice): Promise<Result<SignedInvoice>> {
-        const credentials = this.egs.getCredentials();
-        if (!credentials) {
-            return {
-                success: false,
-                error: new ConfigurationError("Not onboarded. Call onboard() first or restore state."),
-            };
-        }
+        return this.withSignChainLock(async () => {
+            const credentials = this.egs.getCredentials();
+            if (!credentials) {
+                return {
+                    success: false,
+                    error: new ConfigurationError("Not onboarded. Call onboard() first or restore state."),
+                };
+            }
 
-        const prepared = this.prepareInvoice(invoice);
-        const result = await signInvoice(prepared, {
-            credentials,
-            // The developer sandbox issues canned certificates that never match
-            // the CSR key; simulation/production certificates must match.
-            allowCertificateKeyMismatch: this.egs.getEnvironment() === "sandbox",
+            const prepared = this.prepareInvoice(invoice);
+            const result = await signInvoice(prepared, {
+                credentials,
+                // The developer sandbox issues canned certificates that never match
+                // the CSR key; simulation/production certificates must match.
+                allowCertificateKeyMismatch: this.egs.getEnvironment() === "sandbox",
+            });
+            if (result.success) {
+                this.invoiceCounter = prepared.invoiceCounterValue;
+                this.previousInvoiceHash = result.data.invoiceHash;
+            }
+            return result;
         });
-        if (result.success) {
-            this.invoiceCounter = prepared.invoiceCounterValue;
-            this.previousInvoiceHash = result.data.invoiceHash;
-        }
-        return result;
     }
 
     /**
      * Sign and submit an invoice. Simplified invoices (02xxxxx) are reported;
      * standard invoices (01xxxxx) are cleared.
      *
-     * Returns success even when ZATCA rejects the submission — check
+     * Returns `success:true` even when ZATCA rejects the submission — check
      * `data.accepted`. The signed artifacts are always returned so a failed
      * submission can be retried without re-signing (the ICV was consumed).
+     *
+     * Auth/network errors (`APIError` with `statusCode` 0 or 401/429/5xx) are
+     * also surfaced via `data.accepted:false`. Inspect `data.error` (and its
+     * `statusCode`/`zatcaErrors` when it is an `APIError`) to distinguish
+     * validation rejection from transient or credential failures — only the
+     * former should NOT be retried automatically. ZATCA deduplicates by
+     * `uuid`/`invoiceHash`; re-POSTing the same `signedInvoice` after a
+     * network timeout is idempotent, but calling `submitInvoice` again with
+     * the same `Invoice` object will consume a NEW ICV — use
+     * `clearInvoice`/`reportInvoice` directly with the returned
+     * `signedInvoice` for retry.
      */
     async submitInvoice(invoice: Invoice): Promise<Result<SubmissionResult>> {
         const signResult = await this.sign(invoice);

@@ -34,16 +34,3 @@ export const XML_NS_DECLARATIONS = `
   xmlns:cbc="${XML_NAMESPACES.cbc}"
   xmlns:ext="${XML_NAMESPACES.ext}"
 `.trim().replace(/\n\s+/g, " ");
-
-/**
- * XML namespace declarations for signed invoice
- */
-export const XML_NS_DECLARATIONS_SIGNED = `
-  xmlns="${XML_NAMESPACES.ubl}"
-  xmlns:cac="${XML_NAMESPACES.cac}"
-  xmlns:cbc="${XML_NAMESPACES.cbc}"
-  xmlns:ext="${XML_NAMESPACES.ext}"
-  xmlns:sig="${XML_NAMESPACES.sig}"
-  xmlns:sac="${XML_NAMESPACES.sac}"
-  xmlns:sbc="${XML_NAMESPACES.sbc}"
-`.trim().replace(/\n\s+/g, " ");

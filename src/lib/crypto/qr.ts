@@ -3,6 +3,8 @@
 
 import QRCode from "qrcode";
 import type { Result, SignedInvoiceData } from "../types";
+import { ValidationError, ZATCAError } from "../errors";
+import { formatMoney } from "../money";
 
 /**
  * ZATCA Phase 2 TLV tags
@@ -73,7 +75,7 @@ export function decodeTLVString(base64String: string): Result<Partial<SignedInvo
             const length = buffer[offset + 1]!;
             offset += 2;
             if (offset + length > buffer.length) {
-                return { success: false, error: new Error("TLV decoding failed: truncated value") };
+                return { success: false, error: new ValidationError("TLV decoding failed: truncated value") };
             }
             const raw = buffer.subarray(offset, offset + length);
             offset += length;
@@ -88,14 +90,25 @@ export function decodeTLVString(base64String: string): Result<Partial<SignedInvo
                 case TLV_TAGS.DIGITAL_SIGNATURE: result.digitalSignature = raw.toString("utf8"); break;
                 case TLV_TAGS.PUBLIC_KEY: result.publicKey = raw.toString("base64"); break;
                 case TLV_TAGS.CERTIFICATE_SIGNATURE: result.certificateSignature = raw.toString("base64"); break;
+                default:
+                    break;
             }
+        }
+
+        if (offset !== buffer.length) {
+            return {
+                success: false,
+                error: new ValidationError(
+                    `TLV decoding failed: ${buffer.length - offset} trailing byte(s) after last TLV`,
+                ),
+            };
         }
 
         return { success: true, data: result };
     } catch (error) {
         return {
             success: false,
-            error: new Error(
+            error: new ValidationError(
                 `TLV decoding failed: ${error instanceof Error ? error.message : "Unknown error"}`,
             ),
         };
@@ -111,10 +124,11 @@ export function formatQrTimestamp(issueDate: string, issueTime: string): string 
     return `${issueDate}T${issueTime}`;
 }
 
-/** Format an amount with exactly 2 decimals, as ZATCA expects in QR tags 4–5 */
+/** Format an amount with exactly 2 decimals, as ZATCA expects in QR tags 4–5 — decimal half-up */
 export function formatAmount(amount: number | string): string {
     const num = typeof amount === "string" ? parseFloat(amount) : amount;
-    return num.toFixed(2);
+    if (!Number.isFinite(num)) throw new Error(`formatAmount: expected finite number, got ${amount}`);
+    return formatMoney(num);
 }
 
 // ============================================================================
@@ -143,7 +157,7 @@ export async function generateQRDataURL(
     } catch (error) {
         return {
             success: false,
-            error: new Error(`QR generation failed: ${error instanceof Error ? error.message : "Unknown error"}`),
+            error: new ZATCAError(`QR generation failed: ${error instanceof Error ? error.message : "Unknown error"}`, "QR_ERROR"),
         };
     }
 }
@@ -164,7 +178,7 @@ export async function generateQRBuffer(
     } catch (error) {
         return {
             success: false,
-            error: new Error(`QR buffer generation failed: ${error instanceof Error ? error.message : "Unknown error"}`),
+            error: new ZATCAError(`QR buffer generation failed: ${error instanceof Error ? error.message : "Unknown error"}`, "QR_ERROR"),
         };
     }
 }
@@ -185,7 +199,7 @@ export async function generateQRSVG(
     } catch (error) {
         return {
             success: false,
-            error: new Error(`QR SVG generation failed: ${error instanceof Error ? error.message : "Unknown error"}`),
+            error: new ZATCAError(`QR SVG generation failed: ${error instanceof Error ? error.message : "Unknown error"}`, "QR_ERROR"),
         };
     }
 }

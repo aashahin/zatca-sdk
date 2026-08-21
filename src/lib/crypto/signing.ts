@@ -14,6 +14,14 @@ import { parsePrivateKey } from "./keys";
 export const INITIAL_PREVIOUS_HASH =
     "NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==";
 
+/** First non-blank candidate, or the chain-start hash. */
+export function resolvePreviousInvoiceHash(...candidates: Array<string | undefined>): string {
+    for (const candidate of candidates) {
+        if (candidate?.trim()) return candidate;
+    }
+    return INITIAL_PREVIOUS_HASH;
+}
+
 /**
  * Create the invoice digital signature the way ZATCA defines it:
  * ECDSA-secp256k1 over SHA256(invoice-hash-bytes), DER-encoded, base64.

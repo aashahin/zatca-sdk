@@ -11,7 +11,7 @@
 // 5. Self-check: re-hash the FINAL document and verify the ECDSA signature —
 //    a signing bug fails here instead of at ZATCA.
 
-import { INITIAL_PREVIOUS_HASH, derivePublicPoint, verifyInvoiceSignature } from "../crypto/signing";
+import { derivePublicPoint, resolvePreviousInvoiceHash, verifyInvoiceSignature } from "../crypto/signing";
 import {
     formatAmount,
     formatQrTimestamp,
@@ -22,7 +22,7 @@ import { buildInvoiceXml, replaceQrPlaceholder } from "../xml/builder";
 import { computeInvoiceHash as hashInvoiceDocument } from "../xml/canonicalize";
 import { createUBLExtensions, insertUBLExtensions } from "../xml/xades";
 import { SigningError, ValidationError } from "../errors";
-import type { Invoice, Result, SignedInvoiceData } from "../types";
+import type { DocumentAllowance, Invoice, InvoiceLine, Result, SignedInvoiceData, TaxSubtotal } from "../types";
 
 export interface SignedInvoice {
     /** Complete signed XML, ready for submission */
@@ -70,7 +70,15 @@ export async function signInvoice(
     invoice: Invoice,
     config: SignerConfig,
 ): Promise<Result<SignedInvoice>> {
-    const validationErrors = validateInvoice(invoice);
+    const prepared: Invoice = {
+        ...invoice,
+        previousInvoiceHash: resolvePreviousInvoiceHash(
+            config.previousInvoiceHash,
+            invoice.previousInvoiceHash,
+        ),
+    };
+
+    const validationErrors = validateInvoice(prepared);
     if (validationErrors.length > 0) {
         return {
             success: false,
@@ -80,14 +88,8 @@ export async function signInvoice(
         };
     }
 
-    const invoiceWithPih: Invoice = {
-        ...invoice,
-        previousInvoiceHash:
-            config.previousInvoiceHash ?? invoice.previousInvoiceHash ?? INITIAL_PREVIOUS_HASH,
-    };
-
     // 1. Assemble the full document (QR placeholder + signature scaffolding)
-    const xmlResult = buildInvoiceXml(invoiceWithPih);
+    const xmlResult = buildInvoiceXml(prepared);
     if (!xmlResult.success) return xmlResult;
     const assembledXml = xmlResult.data;
 
@@ -110,11 +112,11 @@ export async function signInvoice(
 
     // 4. QR payload
     const qrData: SignedInvoiceData = {
-        sellerName: invoice.seller.registrationName,
-        vatNumber: invoice.seller.vatNumber ?? "",
-        timestamp: formatQrTimestamp(invoice.issueDate, invoice.issueTime),
-        invoiceTotal: formatAmount(invoice.taxInclusiveAmount),
-        vatTotal: formatAmount(invoice.taxTotal),
+        sellerName: prepared.seller.registrationName,
+        vatNumber: prepared.seller.vatNumber ?? "",
+        timestamp: formatQrTimestamp(prepared.issueDate, prepared.issueTime),
+        invoiceTotal: formatAmount(prepared.taxInclusiveAmount),
+        vatTotal: formatAmount(prepared.taxTotal),
         invoiceHash,
         digitalSignature: signatureValue,
         publicKey: certificate.publicKeyBase64,
@@ -175,7 +177,7 @@ export async function signInvoice(
     const result: SignedInvoice = {
         signedXml,
         invoiceHash,
-        uuid: invoice.uuid,
+        uuid: prepared.uuid,
         invoiceBase64: Buffer.from(signedXml, "utf8").toString("base64"),
         qrTlvBase64,
     };
@@ -193,7 +195,10 @@ export async function signInvoice(
  * PIH chain). Uses the same assembled-document semantics as signInvoice.
  */
 export function computeInvoiceHash(invoice: Invoice): Result<string> {
-    const xmlResult = buildInvoiceXml(invoice);
+    const xmlResult = buildInvoiceXml({
+        ...invoice,
+        previousInvoiceHash: resolvePreviousInvoiceHash(invoice.previousInvoiceHash),
+    });
     if (!xmlResult.success) return xmlResult;
     return hashInvoiceDocument(xmlResult.data);
 }
@@ -204,8 +209,154 @@ export function computeInvoiceHash(invoice: Invoice): Result<string> {
 
 const AMOUNT_TOLERANCE = 0.011;
 
+function isFiniteNumber(n: unknown): n is number {
+    return typeof n === "number" && Number.isFinite(n);
+}
+
+function isZeroRateCategory(category: string | undefined): boolean {
+    return category === "Z" || category === "E" || category === "O";
+}
+
 function offBy(a: number, b: number): boolean {
+    if (!isFiniteNumber(a) || !isFiniteNumber(b)) return true;
     return Math.abs(a - b) > AMOUNT_TOLERANCE;
+}
+
+function requireFiniteAmount(
+    value: unknown,
+    label: string,
+    errors: string[],
+    bounds: { min?: number; max?: number } = {},
+): boolean {
+    if (!isFiniteNumber(value)) {
+        errors.push(`${label} must be a finite number`);
+        return false;
+    }
+    if (bounds.min !== undefined && value < bounds.min) {
+        errors.push(`${label} must be >= ${bounds.min}`);
+        return false;
+    }
+    if (bounds.max !== undefined && value > bounds.max) {
+        errors.push(`${label} must be <= ${bounds.max}`);
+        return false;
+    }
+    return true;
+}
+
+function pushLineErrors(line: InvoiceLine, errors: string[]): void {
+    const prefix = `Line ${line.id ?? "?"}`;
+    if (!isFiniteNumber(line.quantity) || line.quantity < 0) {
+        errors.push(`${prefix}: quantity must be a finite number >= 0`);
+    }
+    if (!isFiniteNumber(line.unitPrice) || line.unitPrice < 0) {
+        errors.push(`${prefix}: unitPrice must be a finite number >= 0`);
+    }
+    if (!isFiniteNumber(line.lineTotal) || line.lineTotal < 0) {
+        errors.push(`${prefix}: lineTotal must be a finite number >= 0`);
+    }
+    if (!isFiniteNumber(line.vatAmount) || line.vatAmount < 0) {
+        errors.push(`${prefix}: vatAmount must be a finite number >= 0`);
+    }
+    if (!isFiniteNumber(line.vatPercent) || line.vatPercent < 0 || line.vatPercent > 100) {
+        errors.push(`${prefix}: vatPercent must be 0-100`);
+    }
+    if (line.discount !== undefined && (!isFiniteNumber(line.discount) || line.discount < 0)) {
+        errors.push(`${prefix}: discount must be a finite number >= 0`);
+    }
+    if (isFiniteNumber(line.quantity) && isFiniteNumber(line.unitPrice) && isFiniteNumber(line.discount ?? 0) && isFiniteNumber(line.lineTotal)) {
+        if ((line.discount ?? 0) > line.quantity * line.unitPrice + 1e-9) {
+            errors.push(`${prefix}: discount ${line.discount} exceeds quantity×unitPrice (${(line.quantity * line.unitPrice).toFixed(2)})`);
+        }
+        const expectedNet = line.quantity * line.unitPrice - (line.discount ?? 0);
+        if (offBy(expectedNet, line.lineTotal)) {
+            errors.push(`${prefix}: lineTotal ${line.lineTotal} ≠ quantity×unitPrice−discount (${expectedNet.toFixed(2)})`);
+        }
+    }
+    if (isFiniteNumber(line.lineTotal) && isFiniteNumber(line.vatPercent) && isFiniteNumber(line.vatAmount)) {
+        if (isZeroRateCategory(line.vatCategory) && line.vatPercent !== 0) {
+            errors.push(`${prefix}: vatPercent must be 0 for VAT category ${line.vatCategory}`);
+        }
+        if (line.vatCategory === "S" && line.vatPercent === 0) {
+            errors.push(`${prefix}: vatPercent must be > 0 for standard-rated category S`);
+        }
+        const expectedVat = (line.lineTotal * line.vatPercent) / 100;
+        if (offBy(expectedVat, line.vatAmount)) {
+            errors.push(`${prefix}: vatAmount ${line.vatAmount} ≠ lineTotal×vatPercent (${expectedVat.toFixed(2)})`);
+        }
+    }
+}
+
+function pushTaxSubtotalErrors(subtotals: TaxSubtotal[] | undefined, errors: string[]): void {
+    if (!subtotals || subtotals.length === 0) {
+        errors.push("At least one taxSubtotal is required");
+        return;
+    }
+    for (const [idx, subtotal] of subtotals.entries()) {
+        const label = `taxSubtotal[${idx}]`;
+        requireFiniteAmount(subtotal.taxableAmount, `${label}.taxableAmount`, errors, { min: 0 });
+        requireFiniteAmount(subtotal.taxAmount, `${label}.taxAmount`, errors, { min: 0 });
+        requireFiniteAmount(subtotal.taxPercent, `${label}.taxPercent`, errors, { min: 0, max: 100 });
+        if (isZeroRateCategory(subtotal.taxCategory)) {
+            if (subtotal.taxPercent !== 0) {
+                errors.push(`${label}: taxPercent must be 0 for category ${subtotal.taxCategory}`);
+            }
+            if (!subtotal.exemptionReasonCode && !subtotal.exemptionReason) {
+                errors.push(`${label}: exemptionReasonCode or exemptionReason is required for category ${subtotal.taxCategory}`);
+            }
+        }
+    }
+}
+
+function pushAllowanceErrors(allowances: DocumentAllowance[] | undefined, errors: string[]): void {
+    for (const [idx, allowance] of (allowances ?? []).entries()) {
+        const label = `allowances[${idx}]`;
+        requireFiniteAmount(allowance.amount, `${label}.amount`, errors, { min: 0 });
+        requireFiniteAmount(allowance.vatPercent, `${label}.vatPercent`, errors, { min: 0, max: 100 });
+        if (!allowance.reason) errors.push(`${label}.reason is required`);
+    }
+}
+
+function pushTotalsErrors(invoice: Invoice, errors: string[]): void {
+    const linesSum = (invoice.lines ?? []).reduce(
+        (sum, line) => sum + (isFiniteNumber(line.lineTotal) ? line.lineTotal : 0),
+        0,
+    );
+    if (isFiniteNumber(invoice.lineExtensionAmount) && offBy(linesSum, invoice.lineExtensionAmount)) {
+        errors.push(`lineExtensionAmount ${invoice.lineExtensionAmount} ≠ sum of line totals (${linesSum.toFixed(2)})`);
+    }
+    const allowanceTotal = invoice.allowanceTotalAmount
+        ?? (invoice.allowances ?? []).reduce(
+            (sum, allowance) => sum + (isFiniteNumber(allowance.amount) ? allowance.amount : 0),
+            0,
+        );
+    if (
+        isFiniteNumber(invoice.lineExtensionAmount)
+        && isFiniteNumber(invoice.taxExclusiveAmount)
+        && offBy(invoice.lineExtensionAmount - allowanceTotal, invoice.taxExclusiveAmount)
+    ) {
+        errors.push(`taxExclusiveAmount ${invoice.taxExclusiveAmount} ≠ lineExtensionAmount − allowances (${(invoice.lineExtensionAmount - allowanceTotal).toFixed(2)})`);
+    }
+    if (
+        isFiniteNumber(invoice.taxExclusiveAmount)
+        && isFiniteNumber(invoice.taxTotal)
+        && isFiniteNumber(invoice.taxInclusiveAmount)
+        && offBy(invoice.taxExclusiveAmount + invoice.taxTotal, invoice.taxInclusiveAmount)
+    ) {
+        errors.push(`taxInclusiveAmount ${invoice.taxInclusiveAmount} ≠ taxExclusiveAmount + taxTotal (${(invoice.taxExclusiveAmount + invoice.taxTotal).toFixed(2)})`);
+    }
+    if (isFiniteNumber(invoice.taxInclusiveAmount) && isFiniteNumber(invoice.payableAmount)) {
+        const expectedPayable = invoice.taxInclusiveAmount - (invoice.prepaidAmount ?? 0) + (invoice.payableRoundingAmount ?? 0);
+        if (offBy(expectedPayable, invoice.payableAmount)) {
+            errors.push(`payableAmount ${invoice.payableAmount} ≠ taxInclusive − prepaid + rounding (${expectedPayable.toFixed(2)})`);
+        }
+    }
+    const subtotalsVat = (invoice.taxSubtotals ?? []).reduce(
+        (sum, subtotal) => sum + (isFiniteNumber(subtotal.taxAmount) ? subtotal.taxAmount : 0),
+        0,
+    );
+    if (isFiniteNumber(invoice.taxTotal) && offBy(subtotalsVat, invoice.taxTotal)) {
+        errors.push(`taxTotal ${invoice.taxTotal} ≠ sum of taxSubtotals (${subtotalsVat.toFixed(2)})`);
+    }
 }
 
 /**
@@ -225,11 +376,34 @@ export function validateInvoice(invoice: Invoice): string[] {
     if (!Number.isInteger(invoice.invoiceCounterValue) || invoice.invoiceCounterValue < 1) {
         errors.push("invoiceCounterValue (ICV) must be a positive integer");
     }
-    if (invoice.previousInvoiceHash && !/^[A-Za-z0-9+/]+={0,2}$/.test(invoice.previousInvoiceHash)) {
+    if (invoice.previousInvoiceHash?.trim() && !/^[A-Za-z0-9+/]+={0,2}$/.test(invoice.previousInvoiceHash)) {
         errors.push("previousInvoiceHash (PIH) must be base64");
     }
+    if (!["388", "381", "383"].includes(invoice.invoiceTypeCode as string)) {
+        errors.push(`invoiceTypeCode must be 388, 381 or 383, got "${invoice.invoiceTypeCode}"`);
+    }
+    if (!/^[A-Z]{3}$/.test(invoice.documentCurrency ?? "")) {
+        errors.push(`documentCurrency must be a 3-letter ISO code, got "${invoice.documentCurrency}"`);
+    }
+    if (!/^[A-Z]{3}$/.test(invoice.taxCurrency ?? "")) {
+        errors.push(`taxCurrency must be a 3-letter ISO code, got "${invoice.taxCurrency}"`);
+    }
 
-    // Seller
+    const amounts: Array<[unknown, string, number?]> = [
+        [invoice.lineExtensionAmount, "lineExtensionAmount", 0],
+        [invoice.taxExclusiveAmount, "taxExclusiveAmount", 0],
+        [invoice.taxInclusiveAmount, "taxInclusiveAmount", 0],
+        [invoice.payableAmount, "payableAmount", 0],
+        [invoice.taxTotal, "taxTotal", 0],
+        [invoice.allowanceTotalAmount, "allowanceTotalAmount", 0],
+        [invoice.prepaidAmount, "prepaidAmount", 0],
+        [invoice.payableRoundingAmount, "payableRoundingAmount"],
+        [invoice.taxTotalInSAR, "taxTotalInSAR", 0],
+    ];
+    for (const [amount, label, min] of amounts) {
+        if (amount !== undefined) requireFiniteAmount(amount, label, errors, min !== undefined ? { min } : {});
+    }
+
     if (!invoice.seller?.registrationName) errors.push("Seller registration name is required");
     if (!invoice.seller?.vatNumber) {
         errors.push("Seller VAT number is required");
@@ -241,64 +415,45 @@ export function validateInvoice(invoice: Invoice): string[] {
         if (!sellerAddress.citySubdivision) errors.push("Seller district (citySubdivision) is required (BR-KSA-09)");
         if (!/^\d{4}$/.test(sellerAddress.buildingNumber ?? "")) errors.push("Seller building number must be 4 digits (BR-KSA-37)");
         if (!/^\d{5}$/.test(sellerAddress.postalCode ?? "")) errors.push("Seller postal code must be 5 digits (BR-KSA-66)");
+        if (!sellerAddress.street) errors.push("Seller street is required");
+        if (!sellerAddress.city) errors.push("Seller city is required");
+    } else {
+        errors.push("Seller address is required");
     }
 
-    // Buyer rules
-    const isStandard = invoice.invoiceSubType.startsWith("01");
+    const isStandard = invoice.invoiceSubType?.startsWith("01");
     if (isStandard) {
         if (!invoice.buyer) {
             errors.push("Buyer is required for standard invoices");
         } else if (!invoice.buyer.vatNumber && !invoice.buyer.identification) {
             errors.push("Standard invoice buyer needs a VAT number or another identification");
         }
+        if (!invoice.actualDeliveryDate) {
+            errors.push("actualDeliveryDate is required for standard invoices (supply date)");
+        } else if (!/^\d{4}-\d{2}-\d{2}$/.test(invoice.actualDeliveryDate)) {
+            errors.push("actualDeliveryDate must be YYYY-MM-DD");
+        }
+        if (invoice.latestDeliveryDate && !/^\d{4}-\d{2}-\d{2}$/.test(invoice.latestDeliveryDate)) {
+            errors.push("latestDeliveryDate must be YYYY-MM-DD");
+        }
     }
 
-    // Credit/debit notes
     const isCreditOrDebit = invoice.invoiceTypeCode === "381" || invoice.invoiceTypeCode === "383";
     if (isCreditOrDebit) {
         if (!invoice.billingReference) errors.push("Credit/debit notes require billingReference (original invoice)");
         if (!invoice.creditDebitReason) errors.push("Credit/debit notes require creditDebitReason (KSA-10)");
     }
 
-    // Lines
     if (!invoice.lines || invoice.lines.length === 0) {
         errors.push("At least one invoice line is required");
     } else {
-        for (const line of invoice.lines) {
-            const expectedNet = line.quantity * line.unitPrice - (line.discount ?? 0);
-            if (offBy(expectedNet, line.lineTotal)) {
-                errors.push(`Line ${line.id}: lineTotal ${line.lineTotal} ≠ quantity×unitPrice−discount (${expectedNet.toFixed(2)})`);
-            }
-            const expectedVat = (line.lineTotal * line.vatPercent) / 100;
-            if (offBy(expectedVat, line.vatAmount)) {
-                errors.push(`Line ${line.id}: vatAmount ${line.vatAmount} ≠ lineTotal×vatPercent (${expectedVat.toFixed(2)})`);
-            }
-        }
+        for (const line of invoice.lines) pushLineErrors(line, errors);
     }
 
-    // Totals arithmetic
-    const linesSum = (invoice.lines ?? []).reduce((sum, line) => sum + line.lineTotal, 0);
-    if (offBy(linesSum, invoice.lineExtensionAmount)) {
-        errors.push(`lineExtensionAmount ${invoice.lineExtensionAmount} ≠ sum of line totals (${linesSum.toFixed(2)})`);
-    }
-    const allowanceTotal = invoice.allowanceTotalAmount
-        ?? (invoice.allowances ?? []).reduce((sum, allowance) => sum + allowance.amount, 0);
-    if (offBy(invoice.lineExtensionAmount - allowanceTotal, invoice.taxExclusiveAmount)) {
-        errors.push(`taxExclusiveAmount ${invoice.taxExclusiveAmount} ≠ lineExtensionAmount − allowances (${(invoice.lineExtensionAmount - allowanceTotal).toFixed(2)})`);
-    }
-    if (offBy(invoice.taxExclusiveAmount + invoice.taxTotal, invoice.taxInclusiveAmount)) {
-        errors.push(`taxInclusiveAmount ${invoice.taxInclusiveAmount} ≠ taxExclusiveAmount + taxTotal (${(invoice.taxExclusiveAmount + invoice.taxTotal).toFixed(2)})`);
-    }
-    const expectedPayable = invoice.taxInclusiveAmount - (invoice.prepaidAmount ?? 0) + (invoice.payableRoundingAmount ?? 0);
-    if (offBy(expectedPayable, invoice.payableAmount)) {
-        errors.push(`payableAmount ${invoice.payableAmount} ≠ taxInclusive − prepaid + rounding (${expectedPayable.toFixed(2)})`);
-    }
-    const subtotalsVat = (invoice.taxSubtotals ?? []).reduce((sum, subtotal) => sum + subtotal.taxAmount, 0);
-    if (offBy(subtotalsVat, invoice.taxTotal)) {
-        errors.push(`taxTotal ${invoice.taxTotal} ≠ sum of taxSubtotals (${subtotalsVat.toFixed(2)})`);
-    }
+    pushTaxSubtotalErrors(invoice.taxSubtotals, errors);
+    pushAllowanceErrors(invoice.allowances, errors);
+    pushTotalsErrors(invoice, errors);
 
-    // Currency
     if (invoice.documentCurrency !== "SAR" && invoice.taxCurrency !== "SAR") {
         errors.push("taxCurrency must be SAR (BR-KSA-EN16931-02)");
     }

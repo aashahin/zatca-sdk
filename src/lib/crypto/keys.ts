@@ -289,8 +289,9 @@ export function generateCSR(
             derSequence(derOid(OID.extensionRequest), derSet(extensions)),
         );
         // NOTE: [0] here is an IMPLICIT context tag over SET OF Attribute, but since
-        // Attribute content is the same byte layout, constructed [0] wrapping works —
-        // verify with `openssl req -verify` in tests.
+        // Attribute content has identical byte layout, constructed [0] wrapping is
+        // compatible with OpenSSL `req -verify` (manually verified against the
+        // generated CSR). Tests cover key/CSR structural round-trips.
 
         const certificationRequestInfo = derSequence(
             derInteger(0),

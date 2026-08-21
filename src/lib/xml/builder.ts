@@ -9,6 +9,7 @@
 
 import { XMLError } from "../errors";
 import type { Invoice, InvoiceLine, InvoiceParty, Result, TaxSubtotal } from "../types";
+import { formatMoney, formatQuantity } from "../money";
 import { XML_NS_DECLARATIONS } from "./namespaces";
 
 /** Placeholder replaced with the real TLV payload after signing */
@@ -24,7 +25,7 @@ function escapeXml(str: string): string {
 }
 
 function money(num: number): string {
-    return num.toFixed(2);
+    return formatMoney(num);
 }
 
 /** Drop empty strings and join lines */
@@ -80,20 +81,21 @@ ${i}    </cac:PartyTaxScheme>`,
 
 function buildLineXml(line: InvoiceLine, currency: string): string {
     const hasDiscount = (line.discount ?? 0) > 0;
+    const escCurrency = escapeXml(currency);
     return lines(
         `  <cac:InvoiceLine>`,
         `    <cbc:ID>${escapeXml(line.id)}</cbc:ID>`,
-        `    <cbc:InvoicedQuantity unitCode="${escapeXml(line.unitCode)}">${line.quantity.toFixed(6)}</cbc:InvoicedQuantity>`,
-        `    <cbc:LineExtensionAmount currencyID="${currency}">${money(line.lineTotal)}</cbc:LineExtensionAmount>`,
+        `    <cbc:InvoicedQuantity unitCode="${escapeXml(line.unitCode)}">${formatQuantity(line.quantity)}</cbc:InvoicedQuantity>`,
+        `    <cbc:LineExtensionAmount currencyID="${escCurrency}">${money(line.lineTotal)}</cbc:LineExtensionAmount>`,
         hasDiscount &&
             `    <cac:AllowanceCharge>
       <cbc:ChargeIndicator>false</cbc:ChargeIndicator>
       <cbc:AllowanceChargeReason>${escapeXml(line.discountReason ?? "Discount")}</cbc:AllowanceChargeReason>
-      <cbc:Amount currencyID="${currency}">${money(line.discount ?? 0)}</cbc:Amount>
+      <cbc:Amount currencyID="${escCurrency}">${money(line.discount ?? 0)}</cbc:Amount>
     </cac:AllowanceCharge>`,
         `    <cac:TaxTotal>`,
-        `      <cbc:TaxAmount currencyID="${currency}">${money(line.vatAmount)}</cbc:TaxAmount>`,
-        `      <cbc:RoundingAmount currencyID="${currency}">${money(line.lineTotal + line.vatAmount)}</cbc:RoundingAmount>`,
+        `      <cbc:TaxAmount currencyID="${escCurrency}">${money(line.vatAmount)}</cbc:TaxAmount>`,
+        `      <cbc:RoundingAmount currencyID="${escCurrency}">${money(line.lineTotal + line.vatAmount)}</cbc:RoundingAmount>`,
         `    </cac:TaxTotal>`,
         `    <cac:Item>`,
         `      <cbc:Name>${escapeXml(line.name)}</cbc:Name>`,
@@ -114,10 +116,11 @@ function buildLineXml(line: InvoiceLine, currency: string): string {
 
 function buildTaxSubtotalXml(subtotal: TaxSubtotal, currency: string): string {
     const needsReason = subtotal.taxCategory !== "S";
+    const escCurrency = escapeXml(currency);
     return lines(
         `    <cac:TaxSubtotal>`,
-        `      <cbc:TaxableAmount currencyID="${currency}">${money(subtotal.taxableAmount)}</cbc:TaxableAmount>`,
-        `      <cbc:TaxAmount currencyID="${currency}">${money(subtotal.taxAmount)}</cbc:TaxAmount>`,
+        `      <cbc:TaxableAmount currencyID="${escCurrency}">${money(subtotal.taxableAmount)}</cbc:TaxableAmount>`,
+        `      <cbc:TaxAmount currencyID="${escCurrency}">${money(subtotal.taxAmount)}</cbc:TaxAmount>`,
         `      <cac:TaxCategory>`,
         `        <cbc:ID schemeID="UN/ECE 5305" schemeAgencyID="6">${subtotal.taxCategory}</cbc:ID>`,
         `        <cbc:Percent>${money(subtotal.taxPercent)}</cbc:Percent>`,
@@ -145,6 +148,8 @@ export function buildInvoiceXml(invoice: Invoice): Result<string> {
     try {
         const currency = invoice.documentCurrency;
         const taxCurrency = invoice.taxCurrency;
+        const escCurrency = escapeXml(currency);
+        const escTaxCurrency = escapeXml(taxCurrency);
         const isCreditOrDebit = invoice.invoiceTypeCode === "381" || invoice.invoiceTypeCode === "383";
         const taxTotalInSAR = invoice.taxTotalInSAR ?? invoice.taxTotal;
 
@@ -153,7 +158,7 @@ export function buildInvoiceXml(invoice: Invoice): Result<string> {
                 `  <cac:AllowanceCharge>`,
                 `    <cbc:ChargeIndicator>false</cbc:ChargeIndicator>`,
                 `    <cbc:AllowanceChargeReason>${escapeXml(allowance.reason)}</cbc:AllowanceChargeReason>`,
-                `    <cbc:Amount currencyID="${currency}">${money(allowance.amount)}</cbc:Amount>`,
+                `    <cbc:Amount currencyID="${escCurrency}">${money(allowance.amount)}</cbc:Amount>`,
                 `    <cac:TaxCategory>`,
                 `      <cbc:ID schemeID="UN/ECE 5305" schemeAgencyID="6">${allowance.vatCategory}</cbc:ID>`,
                 `      <cbc:Percent>${money(allowance.vatPercent)}</cbc:Percent>`,
@@ -173,10 +178,10 @@ export function buildInvoiceXml(invoice: Invoice): Result<string> {
             `  <cbc:UUID>${escapeXml(invoice.uuid)}</cbc:UUID>`,
             `  <cbc:IssueDate>${invoice.issueDate}</cbc:IssueDate>`,
             `  <cbc:IssueTime>${invoice.issueTime}</cbc:IssueTime>`,
-            `  <cbc:InvoiceTypeCode name="${invoice.invoiceSubType}">${invoice.invoiceTypeCode}</cbc:InvoiceTypeCode>`,
+            `  <cbc:InvoiceTypeCode name="${escapeXml(invoice.invoiceSubType)}">${escapeXml(invoice.invoiceTypeCode)}</cbc:InvoiceTypeCode>`,
             invoice.note && `  <cbc:Note languageID="ar">${escapeXml(invoice.note)}</cbc:Note>`,
-            `  <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>`,
-            `  <cbc:TaxCurrencyCode>${escapeXml(taxCurrency)}</cbc:TaxCurrencyCode>`,
+            `  <cbc:DocumentCurrencyCode>${escCurrency}</cbc:DocumentCurrencyCode>`,
+            `  <cbc:TaxCurrencyCode>${escTaxCurrency}</cbc:TaxCurrencyCode>`,
             invoice.billingReference &&
                 `  <cac:BillingReference>
     <cac:InvoiceDocumentReference>
@@ -221,21 +226,21 @@ export function buildInvoiceXml(invoice: Invoice): Result<string> {
             `  </cac:PaymentMeans>`,
             allowancesXml,
             `  <cac:TaxTotal>`,
-            `    <cbc:TaxAmount currencyID="${taxCurrency}">${money(taxTotalInSAR)}</cbc:TaxAmount>`,
+            `    <cbc:TaxAmount currencyID="${escTaxCurrency}">${money(taxTotalInSAR)}</cbc:TaxAmount>`,
             `  </cac:TaxTotal>`,
             `  <cac:TaxTotal>`,
-            `    <cbc:TaxAmount currencyID="${currency}">${money(invoice.taxTotal)}</cbc:TaxAmount>`,
+            `    <cbc:TaxAmount currencyID="${escCurrency}">${money(invoice.taxTotal)}</cbc:TaxAmount>`,
             invoice.taxSubtotals.map((s) => buildTaxSubtotalXml(s, currency)).join("\n"),
             `  </cac:TaxTotal>`,
             `  <cac:LegalMonetaryTotal>`,
-            `    <cbc:LineExtensionAmount currencyID="${currency}">${money(invoice.lineExtensionAmount)}</cbc:LineExtensionAmount>`,
-            `    <cbc:TaxExclusiveAmount currencyID="${currency}">${money(invoice.taxExclusiveAmount)}</cbc:TaxExclusiveAmount>`,
-            `    <cbc:TaxInclusiveAmount currencyID="${currency}">${money(invoice.taxInclusiveAmount)}</cbc:TaxInclusiveAmount>`,
-            `    <cbc:AllowanceTotalAmount currencyID="${currency}">${money(invoice.allowanceTotalAmount ?? 0)}</cbc:AllowanceTotalAmount>`,
-            `    <cbc:PrepaidAmount currencyID="${currency}">${money(invoice.prepaidAmount ?? 0)}</cbc:PrepaidAmount>`,
+            `    <cbc:LineExtensionAmount currencyID="${escCurrency}">${money(invoice.lineExtensionAmount)}</cbc:LineExtensionAmount>`,
+            `    <cbc:TaxExclusiveAmount currencyID="${escCurrency}">${money(invoice.taxExclusiveAmount)}</cbc:TaxExclusiveAmount>`,
+            `    <cbc:TaxInclusiveAmount currencyID="${escCurrency}">${money(invoice.taxInclusiveAmount)}</cbc:TaxInclusiveAmount>`,
+            `    <cbc:AllowanceTotalAmount currencyID="${escCurrency}">${money(invoice.allowanceTotalAmount ?? 0)}</cbc:AllowanceTotalAmount>`,
+            `    <cbc:PrepaidAmount currencyID="${escCurrency}">${money(invoice.prepaidAmount ?? 0)}</cbc:PrepaidAmount>`,
             invoice.payableRoundingAmount !== undefined &&
-                `    <cbc:PayableRoundingAmount currencyID="${currency}">${money(invoice.payableRoundingAmount)}</cbc:PayableRoundingAmount>`,
-            `    <cbc:PayableAmount currencyID="${currency}">${money(invoice.payableAmount)}</cbc:PayableAmount>`,
+                `    <cbc:PayableRoundingAmount currencyID="${escCurrency}">${money(invoice.payableRoundingAmount)}</cbc:PayableRoundingAmount>`,
+            `    <cbc:PayableAmount currencyID="${escCurrency}">${money(invoice.payableAmount)}</cbc:PayableAmount>`,
             `  </cac:LegalMonetaryTotal>`,
             invoice.lines.map((line) => buildLineXml(line, currency)).join("\n"),
             `</Invoice>`,

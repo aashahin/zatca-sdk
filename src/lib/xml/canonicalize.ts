@@ -28,11 +28,11 @@ export function parseXML(xml: string): Result<Document> {
         // For hashing/signing, any diagnostic means the document is unusable.
         let parseError: string | undefined;
         const parser = new DOMParser({
-            errorHandler: (_level: string, msg: string) => {
+            onError: (_level: string, msg: string) => {
                 parseError ??= msg;
             },
         });
-        const doc = parser.parseFromString(xml, "text/xml");
+        const doc = parser.parseFromString(xml, "text/xml") as unknown as Document;
         if (parseError || !doc.documentElement) {
             return {
                 success: false,
@@ -58,10 +58,11 @@ export function parseXML(xml: string): Result<Document> {
  */
 function removeSignatureExclusions(doc: Document): void {
     const select = xpath.useNamespaces(ZATCA_NAMESPACES);
+    const xpathRoot = doc as unknown as Node;
     const nodes = [
-        ...(select("//ext:UBLExtensions", doc) as Node[]),
-        ...(select("//cac:Signature", doc) as Node[]),
-        ...(select('//cac:AdditionalDocumentReference[cbc:ID="QR"]', doc) as Node[]),
+        ...(select("//ext:UBLExtensions", xpathRoot) as Node[]),
+        ...(select("//cac:Signature", xpathRoot) as Node[]),
+        ...(select('//cac:AdditionalDocumentReference[cbc:ID="QR"]', xpathRoot) as Node[]),
     ];
     for (const node of nodes) {
         node.parentNode?.removeChild(node);
@@ -89,9 +90,9 @@ export function canonicalizeForSigning(invoiceXml: string): Result<string> {
         removeSignatureExclusions(parsed.data);
         // Serialize + re-parse so the canonicalizer sees a self-contained tree
         const stripped = new XMLSerializer()
-            .serializeToString(parsed.data)
+            .serializeToString(parsed.data as unknown as Parameters<XMLSerializer["serializeToString"]>[0])
             .replace(/^<\?xml[^?]*\?>/, "");
-        const reparsed = new DOMParser().parseFromString(stripped, "text/xml");
+        const reparsed = new DOMParser().parseFromString(stripped, "text/xml") as unknown as Document;
         return { success: true, data: canonicalizeDocument(reparsed) };
     } catch (error) {
         return {

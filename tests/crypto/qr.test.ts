@@ -87,4 +87,28 @@ describe("formatting helpers", () => {
         expect(formatAmount(115)).toBe("115.00");
         expect(formatAmount("30.1")).toBe("30.10");
     });
+
+    test("QR amounts round half-up (not binary toFixed)", () => {
+        expect(formatAmount(1.005)).toBe("1.01");
+        expect(formatAmount(2.675)).toBe("2.68");
+    });
+});
+
+describe("TLV decode strictness", () => {
+    test("rejects a payload with trailing bytes after the last tag", () => {
+        const payload = generateTLVString({
+            sellerName: "A",
+            vatNumber: "399999999900003",
+            timestamp: "2022-01-01T00:00:00",
+            invoiceTotal: "1.00",
+            vatTotal: "0.15",
+            invoiceHash: GOLDEN_SIGNATURE.invoiceHash,
+            digitalSignature: GOLDEN_SIGNATURE.signature,
+            publicKey: GOLDEN_CERT.publicKeyBase64,
+            certificateSignature: GOLDEN_CERT.signatureBase64,
+        });
+        const trailing = Buffer.concat([Buffer.from(payload, "base64"), Buffer.from([0xff])]).toString("base64");
+        const decoded = decodeTLVString(trailing);
+        expect(decoded.success).toBe(false);
+    });
 });

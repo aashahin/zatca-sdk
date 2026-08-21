@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*"],
+  "compilerOptions": {
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "allowImportingTsExtensions": false,
+    "moduleResolution": "node",
+    "module": "ESNext",
+    "target": "ESNext",
+    "verbatimModuleSyntax": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "noEmit": false,
+    "skipLibCheck": true
+  }
+}
