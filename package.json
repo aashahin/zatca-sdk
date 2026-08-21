@@ -1,6 +1,6 @@
 {
   "name": "zatca-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Production-ready ZATCA Phase 2 e-invoicing SDK for Saudi Arabia (Fatoora) — pure-JS crypto, validated against the official ZATCA validator and live sandbox",
   "repository": {
     "type": "git",
