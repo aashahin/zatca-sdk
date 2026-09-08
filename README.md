@@ -96,7 +96,7 @@ The golden fixtures are the official ZATCA SDK's test certificate/key and its ow
 
 - **Hash-consistency by construction.** The builder emits the complete document — including the QR `AdditionalDocumentReference` (placeholder) and `cac:Signature` scaffolding — *before* hashing. The hash is computed by stripping UBLExtensions/Signature/QR and canonicalizing, which is exactly what ZATCA's validator does to the submitted bytes. UBLExtensions is inserted byte-adjacent after `<Invoice …>` so stripping it restores the hashed byte stream.
 - **ZATCA's non-standard XAdES quirks** (all deliberate, all validator-verified): the ECDSA signature is over the invoice-hash bytes (not SignedInfo); the certificate digest is SHA-256 of the base64 DER *text*, hex-encoded then base64; the SignedProperties digest is computed from a byte-exact template with 36-space indentation.
-- **QR TLV** uses single-byte lengths (max 255 bytes per tag). Tags 6–7 store base64 *strings*; tags 8–9 store raw bytes (SPKI DER, cert signature). The timestamp is the literal `issueDate`T`issueTime` — never routed through `Date`.
+- **QR TLV** uses BER lengths: one byte below 128, `0x81` + one byte at 128–255, `0x82` + two bytes above 255. A 64-character Arabic seller name is already 128 UTF-8 bytes — a raw `0x80` length is indefinite-form BER and ZATCA rejects the QR. Tags 6–7 store base64 *strings*; tags 8–9 store raw bytes (SPKI DER, cert signature). The timestamp is the literal `issueDate`T`issueTime` — never routed through `Date`.
 
 ## Requirements
 
