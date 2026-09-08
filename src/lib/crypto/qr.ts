@@ -22,18 +22,47 @@ export const TLV_TAGS = {
 } as const;
 
 /**
- * TLV encoding: 1-byte tag, 1-byte length, value.
- * ZATCA's TLV format has no multi-byte length form — a value longer than
- * 255 bytes cannot be represented and is rejected.
+ * BER length: short form below 128; 0x81 + 1 byte at 128–255; 0x82 + 2 bytes
+ * above 255. Spec text says the length "shall be stored in one byte", which
+ * is only the short form — a 64-character Arabic name is already 128 UTF-8
+ * bytes, and a raw 0x80 length is indefinite-form BER (QRCODE_INVALID).
+ * https://zatca1.discourse.group/t/7202
  */
+function encodeBerLength(length: number): Buffer {
+    if (length < 0x80) return Buffer.from([length]);
+    if (length <= 0xff) return Buffer.from([0x81, length]);
+    if (length <= 0xffff) return Buffer.from([0x82, length >> 8, length & 0xff]);
+    throw new Error(`TLV value is ${length} bytes; BER length supports at most 65535`);
+}
+
+function readBerLength(buffer: Buffer, offset: number): { length: number; headerSize: number } {
+    if (offset >= buffer.length) {
+        throw new Error("truncated length");
+    }
+    const lead = buffer[offset]!;
+    if (lead < 0x80) {
+        return { length: lead, headerSize: 1 };
+    }
+    const lengthBytes = lead & 0x7f;
+    if (lengthBytes === 0) {
+        throw new Error("indefinite length is not allowed");
+    }
+    if (lengthBytes > 2) {
+        throw new Error("unsupported length encoding");
+    }
+    if (offset + 1 + lengthBytes > buffer.length) {
+        throw new Error("truncated length");
+    }
+    let length = 0;
+    for (let i = 0; i < lengthBytes; i++) {
+        length = (length << 8) | buffer[offset + 1 + i]!;
+    }
+    return { length, headerSize: 1 + lengthBytes };
+}
+
 export function tlvEncode(tag: number, value: string | Buffer): Buffer {
     const valueBuffer = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
-    if (valueBuffer.length > 255) {
-        throw new Error(
-            `TLV tag ${tag} value is ${valueBuffer.length} bytes; ZATCA TLV supports at most 255`,
-        );
-    }
-    return Buffer.concat([Buffer.from([tag, valueBuffer.length]), valueBuffer]);
+    return Buffer.concat([Buffer.from([tag]), encodeBerLength(valueBuffer.length), valueBuffer]);
 }
 
 /**
@@ -70,15 +99,15 @@ export function decodeTLVString(base64String: string): Result<Partial<SignedInvo
         const result: Partial<SignedInvoiceData> = {};
         let offset = 0;
 
-        while (offset + 2 <= buffer.length) {
+        while (offset < buffer.length) {
             const tag = buffer[offset]!;
-            const length = buffer[offset + 1]!;
-            offset += 2;
-            if (offset + length > buffer.length) {
+            const { length, headerSize } = readBerLength(buffer, offset + 1);
+            const valueStart = offset + 1 + headerSize;
+            if (valueStart + length > buffer.length) {
                 return { success: false, error: new ValidationError("TLV decoding failed: truncated value") };
             }
-            const raw = buffer.subarray(offset, offset + length);
-            offset += length;
+            const raw = buffer.subarray(valueStart, valueStart + length);
+            offset = valueStart + length;
 
             switch (tag) {
                 case TLV_TAGS.SELLER_NAME: result.sellerName = raw.toString("utf8"); break;
@@ -93,15 +122,6 @@ export function decodeTLVString(base64String: string): Result<Partial<SignedInvo
                 default:
                     break;
             }
-        }
-
-        if (offset !== buffer.length) {
-            return {
-                success: false,
-                error: new ValidationError(
-                    `TLV decoding failed: ${buffer.length - offset} trailing byte(s) after last TLV`,
-                ),
-            };
         }
 
         return { success: true, data: result };

@@ -10,6 +10,20 @@ import {
 } from "../../src/lib/crypto/qr";
 import { GOLDEN_CERT, GOLDEN_QR_TLV, GOLDEN_SIGNATURE } from "../fixtures";
 
+function issue1QrFields(sellerName: string) {
+    return {
+        sellerName,
+        vatNumber: "310122393500003",
+        timestamp: "2022-04-25T15:30:00Z",
+        invoiceTotal: "1000.00",
+        vatTotal: "150.00",
+        invoiceHash: "aGFzaA==",
+        digitalSignature: "c2ln",
+        publicKey: "a2V5",
+        certificateSignature: "Y2VydA==",
+    };
+}
+
 describe("TLV encoding", () => {
     test("single-byte length format", () => {
         const encoded = tlvEncode(1, "hello");
@@ -17,23 +31,45 @@ describe("TLV encoding", () => {
         expect(encoded.subarray(2).toString("utf8")).toBe("hello");
     });
 
-    test("supports values 128–255 bytes (long Arabic seller names)", () => {
-        const longName = "شركة ".repeat(25).trim(); // > 127 UTF-8 bytes
-        const byteLength = Buffer.byteLength(longName, "utf8");
-        expect(byteLength).toBeGreaterThan(127);
-        expect(byteLength).toBeLessThanOrEqual(255);
-
-        const encoded = tlvEncode(1, longName);
-        expect(encoded[1]).toBe(byteLength);
-
-        const payload = Buffer.concat([encoded]).toString("base64");
-        const decoded = decodeTLVString(payload);
-        expect(decoded.success).toBe(true);
-        if (decoded.success) expect(decoded.data.sellerName).toBe(longName);
+    test.each([
+        { label: "127 ASCII bytes stay in the short form", value: "x".repeat(127), header: [1, 127] },
+        { label: "128 ASCII bytes use BER 0x81", value: "x".repeat(128), header: [1, 0x81, 0x80] },
+        { label: "256 ASCII bytes use BER 0x82", value: "x".repeat(256), header: [1, 0x82, 0x01, 0x00] },
+    ])("$label", ({ value, header }) => {
+        const encoded = tlvEncode(1, value);
+        expect([...encoded.subarray(0, header.length)]).toEqual(header);
+        expect(encoded.subarray(header.length).toString("utf8")).toBe(value);
     });
 
-    test("rejects values over 255 bytes (no multi-byte length in ZATCA TLV)", () => {
-        expect(() => tlvEncode(1, "x".repeat(256))).toThrow(/255/);
+    // https://github.com/aashahin/zatca-sdk/issues/1
+    test("64-character Arabic seller name encodes as 01 81 80 — issue #1", () => {
+        const name = "ش".repeat(64);
+        const qr = generateTLVString(issue1QrFields(name));
+        expect([...Buffer.from(qr, "base64").subarray(0, 4)]).toEqual([0x01, 0x81, 0x80, 0xd8]);
+
+        const decoded = decodeTLVString(qr);
+        expect(decoded.success).toBe(true);
+        if (decoded.success) expect(decoded.data.sellerName).toBe(name);
+    });
+
+    // https://github.com/aashahin/zatca-sdk/issues/1
+    test("128-character Arabic seller name encodes as 01 82 01 00 — issue #1", () => {
+        const name = "ش".repeat(128);
+        const qr = generateTLVString(issue1QrFields(name));
+        expect([...Buffer.from(qr, "base64").subarray(0, 4)]).toEqual([0x01, 0x82, 0x01, 0x00]);
+
+        const decoded = decodeTLVString(qr);
+        expect(decoded.success).toBe(true);
+        if (decoded.success) expect(decoded.data.sellerName).toBe(name);
+    });
+
+    test("decoder reads BER 0x81 instead of treating it as length 129", () => {
+        const name = "ش".repeat(64);
+        const value = Buffer.from(name, "utf8");
+        const crafted = Buffer.concat([Buffer.from([1, 0x81, 0x80]), value]).toString("base64");
+        const decoded = decodeTLVString(crafted);
+        expect(decoded.success).toBe(true);
+        if (decoded.success) expect(decoded.data.sellerName).toBe(name);
     });
 
     test("round-trip through generate + decode", () => {
